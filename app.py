@@ -34,6 +34,22 @@ POST /api/move-size       尺码上移/下移，并同步重排指令中的按�
     任一处按尺码倍数项数或数值不合法时整次移动不生效，reorder 错误带原文
     行号 "line" 与字符位置 "char"（均从 1 计）。
 
+POST /api/preview-row    单行针位预览（不展开重复项，可直接看十亿次重复尾段）
+  请求: {"sizes": [...], "pattern": "...", "line": 1, "size_index": 0,
+         "start": 1}
+    line 为图解原文行号（1 起，空行计入行号），size_index 为尺码下标（0 起），
+    start 为起始操作序号（1 起）。嵌套重复与按尺码倍数均按所选尺码定位，
+    每一页最多返回 50 个实际针法，可凭 prev_start/next_start 前后翻页。
+  成功: {"ok": true, "line", "instruction", "size", "size_index",
+         "total", "start", "limit", "consume", "produce",
+         "items": [{"seq", "stitch", "consume_before", "in_from",
+                    "in_to", "out"}, ...],
+         "prev_start", "next_start"}
+    挂线等零入针针法的 in_from/in_to 为 null；非法行返回现有解析错误（原文
+    行号与字符位置），不返回部分预览。
+  失败: {"ok": false, "error": {"type": "sizes"|"line"|"start"|"size_index"
+         |"parse", ...}}
+
 逐行推算规则：每个尺码独立地以上一行的产出作为下一行的可用针数；某尺码
 消耗与可用针数不一致（不足或超出）时，仅该尺码停止并记录行号与差额，
 其余尺码继续推算。指令本身无法解析（含 *{a|b} 项数与尺码数不符、倍数
@@ -63,8 +79,10 @@ from flask import Flask, jsonify, render_template, request
 from stitch_parser import (
     STITCH_NAMES,
     ParseError,
+    PreviewStartError,
     parse_row,
     parse_row_details,
+    preview_row_stitches,
     reorder_size_multipliers,
     suggest_row_fix,
 )
@@ -451,6 +469,96 @@ def move_size():
     for new_idx, old_idx in enumerate(order):
         new_sizes[new_idx] = sizes[old_idx]
     return jsonify({"ok": True, "sizes": new_sizes, "pattern": new_pattern})
+
+
+@app.post("/api/preview-row")
+def preview_row():
+    """单行针位预览：按图解原文行、尺码与起始操作序号返回一页实际针法。
+
+    沿用多尺码校验的 sizes/pattern 输入与同一套解析语法：非法行返回现有
+    解析错误（原文行号 "line" 与字符位置 "char"，均从 1 计），不返回部分
+    预览。每页最多 50 个针法，响应中的 prev_start/next_start 供前后翻页；
+    嵌套重复与按尺码倍数按所选尺码算术定位、跳过未显示的重复段，不展开
+    整行，十亿次重复也能直接查看尾段。
+    """
+    data = request.get_json(silent=True) or {}
+
+    sizes, err = _parse_sizes(data.get("sizes"))
+    if err:
+        return jsonify({
+            "ok": False,
+            "error": {"line": None, "type": "sizes", "message": err},
+        })
+
+    pattern = data.get("pattern", "")
+    if not isinstance(pattern, str):
+        pattern = str(pattern)
+
+    raw_lines = pattern.splitlines()
+    line = data.get("line")
+    if isinstance(line, bool) or not isinstance(line, int) \
+            or not (1 <= line <= len(raw_lines)):
+        return jsonify({
+            "ok": False,
+            "error": {"line": None, "type": "line",
+                      "message": "图解原文行号必须在 1~{} 之间".format(
+                          max(len(raw_lines), 1))},
+        })
+    text = raw_lines[line - 1].strip()
+    if not text:
+        return jsonify({
+            "ok": False,
+            "error": {"line": line, "type": "line",
+                      "message": "第 {} 行为空行，没有可预览的指令".format(line)},
+        })
+
+    num_sizes = len(sizes)
+    size_index = data.get("size_index", 0)
+    if isinstance(size_index, bool) or not isinstance(size_index, int) \
+            or not (0 <= size_index < num_sizes):
+        return jsonify({
+            "ok": False,
+            "error": {"line": line, "type": "size_index",
+                      "message": "尺码下标必须在 0~{} 之间".format(num_sizes - 1)},
+        })
+
+    start = data.get("start", 1)
+    if isinstance(start, bool) or not isinstance(start, int) or start < 1:
+        return jsonify({
+            "ok": False,
+            "error": {"line": line, "type": "start",
+                      "message": "起始操作序号必须为正整数"},
+        })
+
+    try:
+        preview = preview_row_stitches(text, num_sizes, size_index, start)
+    except PreviewStartError as exc:
+        return jsonify({
+            "ok": False,
+            "error": {"line": line, "type": "start", "total": exc.total,
+                      "message": str(exc)},
+        })
+    except ParseError as exc:
+        # 与校验接口完全一致的语法错误对象（同一原文行号与字符位置）
+        return jsonify({"ok": False, "error": _parse_error_obj(line, text, exc)})
+
+    size = sizes[size_index]
+    return jsonify({
+        "ok": True,
+        "line": line,
+        "instruction": text,
+        "size": size["name"],
+        "size_index": size_index,
+        "cast_on": size["cast_on"],
+        "total": preview["total"],
+        "start": preview["start"],
+        "limit": preview["limit"],
+        "consume": preview["consume"],
+        "produce": preview["produce"],
+        "items": preview["items"],
+        "prev_start": preview["prev_start"],
+        "next_start": preview["next_start"],
+    })
 
 
 def _yarn_summary(yarn, state):

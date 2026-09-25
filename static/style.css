@@ -332,3 +332,120 @@ button.small {
   color: #8a611c;
   font-weight: 600;
 }
+
+/* 单行针位预览 */
+.preview-section {
+  margin-top: 32px;
+  padding-top: 16px;
+  border-top: 2px dashed #c9c2b2;
+}
+
+.preview-section h2 {
+  font-size: 1.2rem;
+}
+
+.preview-controls {
+  display: flex;
+  gap: 16px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.preview-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.preview-item span {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.preview-item select {
+  width: 260px;
+  min-height: 120px;
+  padding: 6px 8px;
+  border: 1px solid #c9c2b2;
+  border-radius: 6px;
+  background: #fff;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+}
+
+.preview-item select option:disabled {
+  color: #a9a294;
+}
+
+.preview-item input[type="number"] {
+  width: 160px;
+  max-width: none;
+}
+
+.preview-actions {
+  padding-bottom: 2px;
+}
+
+.preview-meta {
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin: 10px 0;
+  background: #ece7da;
+  font-size: 0.92rem;
+  line-height: 1.7;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  overflow-x: auto;
+}
+
+.preview-pager {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.preview-pager .small:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#preview-page-info {
+  font-size: 0.9rem;
+  color: #555;
+}
+
+.preview-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9rem;
+  margin-left: auto;
+}
+
+.preview-jump input[type="number"] {
+  width: 110px;
+  max-width: none;
+  padding: 5px 8px;
+}
+
+.preview-jump .small {
+  padding: 5px 12px;
+}
+
+#preview-table td.preview-stitch {
+  font-weight: 600;
+}
+
+#preview-table .preview-zero {
+  color: #8a611c;
+}
+
+#preview-table tr.preview-yo td {
+  background: #fdf6e3;
+}
+
+#preview-table tr.preview-yo td.preview-stitch {
+  color: #8a611c;
+}

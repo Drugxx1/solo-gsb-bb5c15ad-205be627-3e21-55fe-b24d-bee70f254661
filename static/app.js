@@ -415,3 +415,299 @@ function buildRowsTable(rows, withYarn) {
 for (const s of EXAMPLE_SIZES) {
   addSizeRow(s.name, s.cast_on);
 }
+
+// ---------------------------------------------------------------------------
+// 单行针位预览
+// ---------------------------------------------------------------------------
+
+const previewLineSelect = document.getElementById('preview-line');
+const previewSizeSelect = document.getElementById('preview-size');
+const previewStartInput = document.getElementById('preview-start');
+const previewGoBtn = document.getElementById('preview-go');
+const previewMessage = document.getElementById('preview-message');
+const previewResult = document.getElementById('preview-result');
+const previewMeta = document.getElementById('preview-meta');
+const previewPageInfo = document.getElementById('preview-page-info');
+const previewTableBody = document.querySelector('#preview-table tbody');
+const previewFirstBtn = document.getElementById('preview-first');
+const previewPrevBtn = document.getElementById('preview-prev');
+const previewNextBtn = document.getElementById('preview-next');
+const previewLastBtn = document.getElementById('preview-last');
+const previewJumpInput = document.getElementById('preview-jump');
+const previewJumpBtn = document.getElementById('preview-jump-btn');
+const PREVIEW_LIMIT = 50;
+
+// 最近一次预览结果：缓存 total/行/尺码，翻页与跳首尾时复用
+let previewState = null;
+
+function fillPreviewLineSelect() {
+  const previous = previewLineSelect.value;
+  previewLineSelect.replaceChildren();
+  const lines = patternInput.value.split('\n');
+  let found = false;
+  lines.forEach((raw, i) => {
+    const lineno = i + 1;
+    const text = raw.trim();
+    const option = document.createElement('option');
+    option.value = String(lineno);
+    if (text) {
+      const snippet = text.length > 30 ? text.slice(0, 30) + '…' : text;
+      option.textContent = '第 ' + lineno + ' 行：' + snippet;
+    } else {
+      option.textContent = '第 ' + lineno + ' 行（空行）';
+      option.disabled = true;
+    }
+    previewLineSelect.appendChild(option);
+    if (String(lineno) === previous) {
+      option.selected = true;
+      found = true;
+    }
+  });
+  if (!found) {
+    const firstUsable = Array.from(previewLineSelect.options).find((o) => !o.disabled);
+    if (firstUsable) {
+      firstUsable.selected = true;
+    }
+  }
+}
+
+function fillPreviewSizeSelect() {
+  const previous = previewSizeSelect.value;
+  previewSizeSelect.replaceChildren();
+  const sizes = readSizes();
+  let found = false;
+  sizes.forEach((s, i) => {
+    const option = document.createElement('option');
+    option.value = String(i);
+    option.textContent = s.name + '（起针 ' + (s.cast_on || '?') + '）';
+    previewSizeSelect.appendChild(option);
+    if (String(i) === previous) {
+      option.selected = true;
+      found = true;
+    }
+  });
+  if (!found && previewSizeSelect.options.length > 0) {
+    previewSizeSelect.options[0].selected = true;
+  }
+}
+
+function showPreviewMessage(text) {
+  previewMessage.textContent = text;
+  previewMessage.className = 'move-message error';
+  previewMessage.hidden = false;
+}
+
+function hidePreviewMessage() {
+  previewMessage.hidden = true;
+  previewMessage.textContent = '';
+}
+
+function currentPreviewStart() {
+  const value = Number(previewStartInput.value);
+  return Number.isInteger(value) && value >= 1 ? value : 1;
+}
+
+async function requestPreview(start) {
+  fillPreviewLineSelect();
+  fillPreviewSizeSelect();
+  hidePreviewMessage();
+
+  const lineOpt = previewLineSelect.selectedOptions[0];
+  const sizeOpt = previewSizeSelect.selectedOptions[0];
+  if (!lineOpt) {
+    showPreviewMessage('请先在上方填写至少一行图解指令。');
+    previewResult.hidden = true;
+    return;
+  }
+  if (!sizeOpt) {
+    showPreviewMessage('请先在上方填写至少一个有效尺码（名称与正整数起针数）。');
+    previewResult.hidden = true;
+    return;
+  }
+
+  let data;
+  try {
+    const res = await fetch('/api/preview-row', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sizes: readSizes(),
+        pattern: patternInput.value,
+        line: Number(lineOpt.value),
+        size_index: Number(sizeOpt.value),
+        start: start,
+      }),
+    });
+    data = await res.json();
+  } catch (err) {
+    showPreviewMessage('预览请求失败：' + err.message);
+    return;
+  }
+
+  if (!data.ok) {
+    // 非法行返回现有语法错误与原文位置，不显示部分预览
+    previewResult.hidden = true;
+    showPreviewMessage(formatPreviewError(data.error));
+    if (data.error && data.error.type === 'start' && data.error.total !== undefined) {
+      // 把起始序号修正为本行最后一个针法，便于直接再点“预览”看尾段
+      previewStartInput.value = String(data.error.total);
+      previewState = null;
+    }
+    return;
+  }
+
+  previewStartInput.value = String(data.start);
+  previewState = {
+    line: data.line,
+    sizeIndex: data.size_index,
+    total: data.total,
+    data: data,
+  };
+  renderPreview(data);
+}
+
+function formatPreviewError(err) {
+  if (!err) {
+    return '预览失败：未知错误';
+  }
+  if (err.type === 'parse') {
+    return '第 ' + err.line + ' 行指令无法解析（第 ' + (err.char || '?') +
+      ' 个字符）：' + err.message;
+  }
+  if (err.type === 'start') {
+    return err.message + '，请把起始序号改到 1~' + err.total + ' 之间。';
+  }
+  if (err.type === 'line') {
+    return '无法预览该行：' + err.message;
+  }
+  if (err.type === 'size_index') {
+    return '尺码选择无效：' + err.message;
+  }
+  return '预览失败：' + err.message;
+}
+
+function renderPreview(data) {
+  previewResult.hidden = false;
+  hidePreviewMessage();
+
+  previewMeta.textContent =
+    '第 ' + data.line + ' 行 ' + data.instruction +
+    '　｜　尺码 ' + data.size +
+    '　｜　实际针法共 ' + data.total.toLocaleString('zh-CN') + ' 个' +
+    '　｜　整行消耗 ' + data.consume.toLocaleString('zh-CN') +
+    ' 针，产出 ' + data.produce.toLocaleString('zh-CN') + ' 针';
+
+  const first = data.items.length ? data.items[0].seq : data.start;
+  const last = data.items.length ? data.items[data.items.length - 1].seq : data.start - 1;
+  const lastPageStart = data.total - ((data.total - 1) % data.limit);
+  previewPageInfo.textContent =
+    '显示第 ' + first.toLocaleString('zh-CN') + '–' + last.toLocaleString('zh-CN') +
+    ' 个（共 ' + data.total.toLocaleString('zh-CN') + ' 个）';
+
+  previewFirstBtn.disabled = data.start <= 1;
+  previewPrevBtn.disabled = data.start <= 1 || data.prev_start === data.start;
+  previewNextBtn.disabled = data.next_start === null;
+  previewLastBtn.disabled = data.next_start === null && data.start === lastPageStart;
+  previewJumpInput.max = String(data.total);
+
+  previewTableBody.replaceChildren();
+  for (const item of data.items) {
+    const tr = document.createElement('tr');
+    tr.className = item.stitch === 'yo' ? 'preview-yo' : '';
+
+    const seqTd = document.createElement('td');
+    seqTd.textContent = item.seq.toLocaleString('zh-CN');
+
+    const stitchTd = document.createElement('td');
+    stitchTd.textContent = item.stitch;
+    stitchTd.className = 'preview-stitch';
+
+    const inTd = document.createElement('td');
+    const insertTd = document.createElement('td');
+    if (item.in_from === null) {
+      // 零入针针法：标明插在第几针之后/最前
+      inTd.textContent = '—（零入针）';
+      inTd.className = 'preview-zero';
+      insertTd.textContent =
+        item.consume_before === 0
+          ? '行首（第 1 针之前）'
+          : '第 ' + item.consume_before.toLocaleString('zh-CN') + ' 针之后';
+    } else {
+      inTd.textContent = item.in_from === item.in_to
+        ? '第 ' + item.in_from.toLocaleString('zh-CN') + ' 针'
+        : '第 ' + item.in_from.toLocaleString('zh-CN') + '–' +
+          item.in_to.toLocaleString('zh-CN') + ' 针';
+      insertTd.textContent = '—';
+    }
+
+    const outTd = document.createElement('td');
+    outTd.textContent = '第 ' + item.out.toLocaleString('zh-CN') + ' 针';
+
+    tr.appendChild(seqTd);
+    tr.appendChild(stitchTd);
+    tr.appendChild(inTd);
+    tr.appendChild(insertTd);
+    tr.appendChild(outTd);
+    previewTableBody.appendChild(tr);
+  }
+}
+
+previewGoBtn.addEventListener('click', () => requestPreview(currentPreviewStart()));
+previewStartInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    requestPreview(currentPreviewStart());
+  }
+});
+previewFirstBtn.addEventListener('click', () => requestPreview(1));
+previewPrevBtn.addEventListener('click', () => {
+  if (previewState && previewState.data) {
+    requestPreview(previewState.data.prev_start);
+  }
+});
+previewNextBtn.addEventListener('click', () => {
+  if (previewState && previewState.data && previewState.data.next_start !== null) {
+    requestPreview(previewState.data.next_start);
+  }
+});
+previewLastBtn.addEventListener('click', () => {
+  if (previewState) {
+    requestPreview(previewState.total - ((previewState.total - 1) % PREVIEW_LIMIT));
+  }
+});
+previewJumpBtn.addEventListener('click', () => {
+  const value = Number(previewJumpInput.value);
+  if (Number.isInteger(value) && value >= 1) {
+    requestPreview(value);
+  }
+});
+previewJumpInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    previewJumpBtn.click();
+  }
+});
+previewLineSelect.addEventListener('focus', fillPreviewLineSelect);
+previewSizeSelect.addEventListener('focus', fillPreviewSizeSelect);
+patternInput.addEventListener('input', () => {
+  fillPreviewLineSelect();
+  previewResult.hidden = true;
+  hidePreviewMessage();
+  previewState = null;
+});
+sizesList.addEventListener('change', fillPreviewSizeSelect);
+sizesList.addEventListener('input', fillPreviewSizeSelect);
+
+// 切换行或尺码后，上一页/尾页等基于旧行 total 的翻页状态作废
+function resetPreviewState() {
+  previewState = null;
+  previewStartInput.value = '1';
+  previewResult.hidden = true;
+  hidePreviewMessage();
+}
+previewLineSelect.addEventListener('change', resetPreviewState);
+previewSizeSelect.addEventListener('change', resetPreviewState);
+
+// 初始填充行与尺码列表
+fillPreviewLineSelect();
+fillPreviewSizeSelect();

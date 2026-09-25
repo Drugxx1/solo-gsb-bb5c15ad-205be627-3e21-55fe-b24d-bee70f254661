@@ -66,6 +66,41 @@ class ParseError(ValueError):
         self.pos = pos
 
 
+class PreviewStartError(ValueError):
+    """针位预览的起始操作序号超出本行实际针法总数。
+
+    total 为该行（所选尺码下）实际针法总数，调用方可据此提示范围。
+    """
+
+    def __init__(self, total):
+        super().__init__("起始操作序号超出范围：本行共 {} 个实际针法".format(total))
+        self.total = total
+
+
+# 单行针位预览每页最多显示的实际针法数
+PREVIEW_PAGE_SIZE = 50
+
+
+class _StitchNode(object):
+    """解析树中的单个记号节点：mults 为各尺码的重复倍数（长度 num_sizes）。"""
+
+    __slots__ = ('name', 'mults')
+
+    def __init__(self, name, mults):
+        self.name = name
+        self.mults = mults
+
+
+class _GroupNode(object):
+    """括号序列节点：children 为括号内的节点，mults 为各尺码的重复倍数。"""
+
+    __slots__ = ('children', 'mults')
+
+    def __init__(self, children, mults):
+        self.children = children
+        self.mults = mults
+
+
 def _tokenize(text):
     tokens = []
     pos = 0
@@ -94,13 +129,15 @@ class _Parser(object):
         self.i += 1
         return tok
 
-    def parse_row(self):
+    def parse_row_with_nodes(self):
         """row := sequence EOF
 
-        返回 (consumes, produces, tallies)：consumes/produces 为长度 num_sizes
-        的针数列表；tallies 为 {记号名: 长度 num_sizes 的次数列表}。
+        返回 (consumes, produces, tallies, nodes)：consumes/produces 为长度
+        num_sizes 的针数列表；tallies 为 {记号名: 长度 num_sizes 的次数列表}；
+        nodes 为顶层节点列表（_StitchNode/_GroupNode），供针位预览定位，
+        与算术累计来自同一条解析路径，故两者的语法检查完全一致。
         """
-        c, p, tallies = self.parse_sequence()
+        c, p, tallies, nodes = self.parse_sequence()
         tok = self.peek()
         if tok is not None:
             kind, val, pos = tok
@@ -113,36 +150,40 @@ class _Parser(object):
                 raise ParseError(
                     "意外的 '*'（第 {} 个字符）：'*' 必须跟在记号或 ')' 之后".format(pos + 1), pos)
             raise ParseError("意外的记号 {!r}（第 {} 个字符）".format(val, pos + 1), pos)
-        return c, p, tallies
+        return c, p, tallies, nodes
 
     def parse_sequence(self):
-        """sequence := item+，消耗/产出/记号次数逐项累加"""
+        """sequence := item+，消耗/产出/记号次数逐项累加，同时收集节点"""
         total_c = [0] * self.num_sizes
         total_p = [0] * self.num_sizes
         total_t = {name: [0] * self.num_sizes for name in STITCH_NAMES}
+        nodes = []
         while True:
             tok = self.peek()
             if tok is None or tok[0] not in ('STITCH', 'LPAREN'):
                 break
-            c, p, tallies = self.parse_item()
+            c, p, tallies, node = self.parse_item()
             for j in range(self.num_sizes):
                 total_c[j] += c[j]
                 total_p[j] += p[j]
                 for name in STITCH_NAMES:
                     total_t[name][j] += tallies[name][j]
-        return total_c, total_p, total_t
+            nodes.append(node)
+        return total_c, total_p, total_t, nodes
 
     def parse_item(self):
-        """item := (STITCH | '(' sequence ')') ('*' repeat)?"""
+        """item := (STITCH | '(' sequence ')') ('*' repeat)?，同时返回对应节点"""
         kind, val, pos = self.advance()
         if kind == 'STITCH':
-            c0, p0 = STITCH_COUNTS[val.lower()]
+            name = val.lower()
+            c0, p0 = STITCH_COUNTS[name]
             c = [c0] * self.num_sizes
             p = [p0] * self.num_sizes
-            tallies = {name: [0] * self.num_sizes for name in STITCH_NAMES}
-            tallies[val.lower()] = [1] * self.num_sizes
+            tallies = {name_: [0] * self.num_sizes for name_ in STITCH_NAMES}
+            tallies[name] = [1] * self.num_sizes
+            node = _StitchNode(name, [1] * self.num_sizes)
         else:  # LPAREN
-            c, p, tallies = self.parse_sequence()
+            c, p, tallies, children = self.parse_sequence()
             if not any(c) and not any(p):
                 raise ParseError("括号内不能为空（第 {} 个字符）".format(pos + 1), pos)
             tok = self.peek()
@@ -152,6 +193,7 @@ class _Parser(object):
                 raise ParseError(
                     "括号内出现意外的记号 {!r}（第 {} 个字符）".format(tok[1], tok[2] + 1), tok[2])
             self.advance()
+            node = _GroupNode(children, [1] * self.num_sizes)
         tok = self.peek()
         if tok is not None and tok[0] == 'STAR':
             self.advance()
@@ -162,7 +204,8 @@ class _Parser(object):
                 name: [cnt * m for cnt, m in zip(counts, mults)]
                 for name, counts in tallies.items()
             }
-        return c, p, tallies
+            node.mults = mults
+        return c, p, tallies, node
 
     def parse_repeat(self, star_tok):
         """repeat := NUM | '{' NUM ('|' NUM)* '}'，返回长度 num_sizes 的倍数列表。
@@ -233,7 +276,24 @@ def parse_row_details(text, num_sizes):
     tokens = _tokenize(text)
     if not tokens:
         raise ParseError("该行没有有效指令")
-    return _Parser(tokens, num_sizes).parse_row()
+    c, p, tallies, _nodes = _Parser(tokens, num_sizes).parse_row_with_nodes()
+    return c, p, tallies
+
+
+def parse_row_nodes(text, num_sizes):
+    """解析一行指令，返回顶层节点列表（_StitchNode/_GroupNode）。
+
+    与 parse_row_details 走同一条解析路径：任何语法错误（含非法记号、括号
+    不匹配、倍数非法、*{...} 项数不符）都以同一 ParseError（同一字符位置）
+    抛出，不会返回部分节点。供单行针位预览定位使用。
+    """
+    if num_sizes < 1:
+        raise ValueError("num_sizes 必须为正整数")
+    tokens = _tokenize(text)
+    if not tokens:
+        raise ParseError("该行没有有效指令")
+    _c, _p, _tallies, nodes = _Parser(tokens, num_sizes).parse_row_with_nodes()
+    return nodes
 
 
 def parse_row_sizes(text, num_sizes):
@@ -455,3 +515,151 @@ def reorder_size_multipliers(text, order):
     for (s, e), replacement in reversed(edits):
         result = result[:s] + replacement + result[e:]
     return result
+
+
+# ---------------------------------------------------------------------------
+# 单行针位预览：按所选尺码把解析树定位成“实际针法序列”，支持按操作序号
+# 随机取一页（最多 PREVIEW_PAGE_SIZE 个）。所有定位只做算术（每个重复段先
+# 求一遍长度/消耗，再用除法跳过整段副本），绝不逐个展开重复项，因此
+# (k)*1000000000 的尾段也能直接查看。
+# ---------------------------------------------------------------------------
+
+
+class _View(object):
+    """所选尺码下定位后的树节点视图。
+
+    kind 为 'stitch'/'group'；children 为定位后的子视图（stitch 时为空）；
+    name 为记号名（仅 stitch）；mult 为该节点在所选尺码下的重复倍数；
+    copy_length/copy_consume/copy_produce 为“一个副本”（括号内序列或单个
+    记号）的实际针法数、消耗与产出针数。
+    """
+
+    __slots__ = ('kind', 'name', 'children', 'mult',
+                 'copy_length', 'copy_consume', 'copy_produce')
+
+    def __init__(self, kind, mult):
+        self.kind = kind
+        self.name = None
+        self.children = []
+        self.mult = mult
+        self.copy_length = 0
+        self.copy_consume = 0
+        self.copy_produce = 0
+
+    @property
+    def length(self):
+        """整个节点（含 mult 个副本）的实际针法数。
+
+        注意必须用 copy_length（一个副本的针法数）而非 copy_consume：
+        yo 不消耗入针，(yo)*3 的针法数是 3 而不是 0。
+        """
+        return self.copy_length * self.mult
+
+    @property
+    def consume(self):
+        """整个节点（含 mult 个副本）消耗的入针数。"""
+        return self.copy_consume * self.mult
+
+    @property
+    def produce(self):
+        """整个节点（含 mult 个副本）产出的出针数。"""
+        return self.copy_produce * self.mult
+
+
+def _resolve_view(node, size_index):
+    """把解析树节点按所选尺码定位成 _View（整棵树递归，副本不展开）。"""
+    mult = node.mults[size_index]
+    if isinstance(node, _StitchNode):
+        c0, p0 = STITCH_COUNTS[node.name]
+        view = _View('stitch', mult)
+        view.name = node.name
+        view.copy_length = 1
+        view.copy_consume = c0
+        view.copy_produce = p0
+        return view
+    view = _View('group', mult)
+    children = [_resolve_view(ch, size_index) for ch in node.children]
+    view.children = children
+    view.copy_length = sum(ch.length for ch in children)
+    view.copy_consume = sum(ch.consume for ch in children)
+    view.copy_produce = sum(ch.produce for ch in children)
+    return view
+
+
+def _locate_stitch(views, offset):
+    """定位偏移 offset（0 起，相对 views 序列起点）所指的实际针法。
+
+    返回 (记号名, 该针法之前已消耗的针数)。每个重复段先算整段长度，再用
+    除法一次跳过 offset//length 个完整副本：十亿次重复也只需除法与取模，
+    绝不逐个遍历副本。
+    """
+    consumed = 0
+    for view in views:
+        if offset >= view.length:
+            # 整段未命中：加上该段全部副本的消耗后继续
+            offset -= view.length
+            consumed += view.consume
+            continue
+        if view.kind == 'stitch':
+            # 命中该记号的第 offset 个副本；前面的副本各消耗 copy_consume
+            return view.name, consumed + view.copy_consume * offset
+        # 命中括号序列的第 copy 个副本中的第 inner 个针法：整段跳过 copy 个
+        # 完整副本（即使该段不消耗入针，也必须用 copy_length 定位副本编号）
+        copy, inner = divmod(offset, view.copy_length)
+        name, inside = _locate_stitch(view.children, inner)
+        return name, consumed + view.copy_consume * copy + inside
+    raise IndexError("针法偏移超出范围")
+
+
+def preview_row_stitches(text, num_sizes, size_index, start):
+    """单行针位预览：返回所选尺码下从第 start 个实际针法起的一页。
+
+    start 为 1 起的操作序号；一页最多 PREVIEW_PAGE_SIZE 个。嵌套重复与
+    按尺码倍数均按 size_index 指定的尺码定位，跳过未显示的重复段，绝不
+    展开整行。非法行抛出与 parse_row_details 相同的 ParseError（同一原文
+    字符位置），不给部分预览；start 超出实际针法总数时抛 PreviewStartError。
+
+    返回 dict：
+      {"total", "start", "limit", "items", "prev_start", "next_start",
+       "consume", "produce"}
+    items 中每项为
+      {"seq", "stitch", "consume_before", "in_from", "in_to", "out"}
+    挂线等零入针针法的 in_from/in_to 为 None。
+    """
+    if not isinstance(size_index, int) or isinstance(size_index, bool) \
+            or not (0 <= size_index < num_sizes):
+        raise ValueError("size_index 必须在尺码范围内")
+    if not isinstance(start, int) or isinstance(start, bool) or start < 1:
+        raise ValueError("start 必须为正整数")
+    nodes = parse_row_nodes(text, num_sizes)
+    views = [_resolve_view(node, size_index) for node in nodes]
+    total = sum(v.length for v in views)
+    if start > total:
+        raise PreviewStartError(total)
+
+    end = min(start - 1 + PREVIEW_PAGE_SIZE, total)
+    items = []
+    for seq in range(start, end + 1):
+        name, before = _locate_stitch(views, seq - 1)
+        c0, _p0 = STITCH_COUNTS[name]
+        items.append({
+            "seq": seq,
+            "stitch": name,
+            "consume_before": before,
+            "in_from": None if c0 == 0 else before + 1,
+            "in_to": None if c0 == 0 else before + c0,
+            # 每个针法恰好产出 1 针，出针序号与操作序号一致
+            "out": seq,
+        })
+
+    prev_start = max(1, start - PREVIEW_PAGE_SIZE)
+    return {
+        "total": total,
+        "start": start,
+        "limit": PREVIEW_PAGE_SIZE,
+        "items": items,
+        "prev_start": prev_start,
+        "next_start": end + 1 if end < total else None,
+        "consume": sum(v.consume for v in views),
+        "produce": sum(v.produce for v in views),
+    }

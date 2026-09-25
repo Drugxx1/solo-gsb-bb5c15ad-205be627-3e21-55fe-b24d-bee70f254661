@@ -33,6 +33,12 @@
       普通 <code>*n</code> 与其他原文不变；若某处按尺码倍数项数或数值不合法，整次移动不生效，
       并提示原文行号与字符位置。
     </p>
+    <p class="hint">
+      下方“单行针位预览”可选择图解原文行、尺码与起始操作序号，按所选尺码定位嵌套重复与
+      <code>*{a|b|c}</code> 倍数，逐针显示消耗的入针范围与产出的出针序号（每页最多 50 个，
+      可前后翻页、直接跳到首尾）；<code>yo</code> 等零入针针法会标明插入位置。重复段不展开，
+      十亿次重复也能直接查看尾段。
+    </p>
 
     <form id="check-form">
       <div class="field">
@@ -87,6 +93,60 @@
     <section id="result" hidden>
       <div id="summary"></div>
       <div id="sizes-results" class="sizes-results"></div>
+    </section>
+
+    <section class="preview-section">
+      <h2>单行针位预览</h2>
+      <p class="hint">
+        选一条非空图解原文行与一个尺码，填起始操作序号后点“预览”：每页最多 50 个实际针法，
+        展示每个针法消耗的入针范围、产出的出针序号；<code>yo</code> 不消耗入针，显示其插入
+        位置。嵌套重复与按尺码倍数按所选尺码定位、整段跳过，不展开重复项。
+      </p>
+      <div class="preview-controls">
+        <label class="preview-item">
+          <span>图解原文行</span>
+          <select id="preview-line" size="6"></select>
+        </label>
+        <label class="preview-item">
+          <span>尺码</span>
+          <select id="preview-size" size="6"></select>
+        </label>
+        <label class="preview-item">
+          <span>起始操作序号</span>
+          <input type="number" id="preview-start" min="1" step="1" value="1">
+        </label>
+        <div class="preview-actions">
+          <button type="button" id="preview-go">预览</button>
+        </div>
+      </div>
+      <div id="preview-message" class="move-message" hidden></div>
+      <div id="preview-result" hidden>
+        <div id="preview-meta" class="preview-meta"></div>
+        <div class="preview-pager">
+          <button type="button" id="preview-first" class="small">« 首页</button>
+          <button type="button" id="preview-prev" class="small">‹ 上一页</button>
+          <span id="preview-page-info"></span>
+          <button type="button" id="preview-next" class="small">下一页 ›</button>
+          <button type="button" id="preview-last" class="small">尾页 »</button>
+          <label class="preview-jump">
+            跳到
+            <input type="number" id="preview-jump" min="1" step="1">
+            <button type="button" id="preview-jump-btn" class="small">Go</button>
+          </label>
+        </div>
+        <table id="preview-table">
+          <thead>
+            <tr>
+              <th>操作序号</th>
+              <th>针法</th>
+              <th>消耗入针</th>
+              <th>插入位置</th>
+              <th>产出出针</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </section>
   </main>
 

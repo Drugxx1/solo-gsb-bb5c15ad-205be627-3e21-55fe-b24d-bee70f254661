@@ -564,5 +564,227 @@ class TestMoveSizeApi(unittest.TestCase):
         self.assertEqual(data['error']['type'], 'move')
 
 
+class TestPreviewRowApi(unittest.TestCase):
+    SIZES = [{'name': 'S', 'cast_on': 12},
+             {'name': 'M', 'cast_on': 16},
+             {'name': 'L', 'cast_on': 20}]
+    PATTERN = '\n'.join([
+        '(k2tog yo)*{6|8|10}',
+        'p*{12|16|20}',
+        '',
+        'ssk bad',
+    ])
+
+    def setUp(self):
+        self.client = app.test_client()
+
+    def preview(self, line, size_index=0, start=1, sizes=None, pattern=None):
+        return self.client.post('/api/preview-row', json={
+            'sizes': sizes or self.SIZES,
+            'pattern': self.PATTERN if pattern is None else pattern,
+            'line': line,
+            'size_index': size_index,
+            'start': start,
+        }).get_json()
+
+    def test_first_page_s_size(self):
+        data = self.preview(1, 0, 1)
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['line'], 1)
+        self.assertEqual(data['instruction'], '(k2tog yo)*{6|8|10}')
+        self.assertEqual(data['size'], 'S')
+        self.assertEqual(data['size_index'], 0)
+        self.assertEqual(data['cast_on'], 12)
+        self.assertEqual(data['total'], 12)
+        self.assertEqual(data['consume'], 12)
+        self.assertEqual(data['produce'], 12)
+        self.assertEqual(data['limit'], 50)
+        self.assertIsNone(data['next_start'])
+        self.assertEqual(len(data['items']), 12)
+        self.assertEqual(data['items'][0], {
+            'seq': 1, 'stitch': 'k2tog', 'consume_before': 0,
+            'in_from': 1, 'in_to': 2, 'out': 1})
+        self.assertEqual(data['items'][1], {
+            'seq': 2, 'stitch': 'yo', 'consume_before': 2,
+            'in_from': None, 'in_to': None, 'out': 2})
+
+    def test_size_index_selects_multiplier(self):
+        data = self.preview(1, 2, 1)
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['size'], 'L')
+        self.assertEqual(data['total'], 20)
+        self.assertEqual(data['consume'], 20)
+
+    def test_pagination_fields(self):
+        pattern = 'k*120'
+        first = self.preview(1, 0, 1,
+                             sizes=[{'name': 'S', 'cast_on': 120}],
+                             pattern=pattern)
+        self.assertEqual(len(first['items']), 50)
+        self.assertEqual(first['next_start'], 51)
+        self.assertEqual(first['prev_start'], 1)
+        second = self.preview(1, 0, 51,
+                              sizes=[{'name': 'S', 'cast_on': 120}],
+                              pattern=pattern)
+        self.assertEqual([i['seq'] for i in second['items']],
+                         list(range(51, 101)))
+        self.assertEqual(second['prev_start'], 1)
+        self.assertEqual(second['next_start'], 101)
+        third = self.preview(1, 0, 101,
+                             sizes=[{'name': 'S', 'cast_on': 120}],
+                             pattern=pattern)
+        self.assertEqual(len(third['items']), 20)
+        self.assertIsNone(third['next_start'])
+
+    def test_huge_repeat_tail(self):
+        # 十亿次重复直接查看尾段，不展开
+        data = self.preview(1, 0, 1999999997,
+                            sizes=[{'name': 'S', 'cast_on': 1}],
+                            pattern='(k yo)*1000000000')
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['total'], 2000000000)
+        self.assertEqual(len(data['items']), 4)
+        self.assertEqual(data['items'][0]['seq'], 1999999997)
+        self.assertEqual(data['items'][-1]['stitch'], 'yo')
+
+    def test_zero_input_yo_marker(self):
+        data = self.preview(1, 0, 1,
+                            sizes=[{'name': 'S', 'cast_on': 4}],
+                            pattern='yo k yo k2tog')
+        self.assertTrue(data['ok'])
+        yo1, _k, yo2, _k2tog = data['items']
+        self.assertIsNone(yo1['in_from'])
+        self.assertIsNone(yo1['in_to'])
+        self.assertEqual(yo1['consume_before'], 0)
+        self.assertEqual(yo2['consume_before'], 1)
+        self.assertEqual(_k2tog['in_from'], 2)
+        self.assertEqual(_k2tog['in_to'], 3)
+
+    def test_zero_consume_only_row_preview(self):
+        # 整行只有挂线：消耗 0 但每个 yo 都是实际针法
+        data = self.preview(1, 0, 1,
+                            sizes=[{'name': 'S', 'cast_on': 4}],
+                            pattern='(yo)*3')
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['total'], 3)
+        self.assertEqual(data['consume'], 0)
+        self.assertEqual(data['produce'], 3)
+        self.assertEqual([i['seq'] for i in data['items']], [1, 2, 3])
+        self.assertTrue(all(i['in_from'] is None for i in data['items']))
+
+    def test_parse_error_returns_existing_error_with_line_and_char(self):
+        # 第 4 行非法：返回与校验接口相同的 parse 错误（原文行号与字符位置），
+        # 不含 items/部分预览
+        data = self.preview(4, 0, 1)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'parse')
+        self.assertEqual(data['error']['line'], 4)
+        self.assertEqual(data['error']['char'], 1)
+        self.assertNotIn('items', data)
+
+    def test_parse_error_size_brace_mismatch_reports_star(self):
+        data = self.preview(1, 0, 1,
+                            sizes=self.SIZES,
+                            pattern='k*{12|16}\n')
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'parse')
+        self.assertEqual(data['error']['line'], 1)
+        self.assertEqual(data['error']['char'], 2)
+        self.assertIn('项数不符', data['error']['message'])
+
+    def test_parse_error_consistent_with_validate_sizes(self):
+        # 同一非法行在两个接口中的消息与字符位置完全一致
+        preview_data = self.preview(1, 0, 1, pattern='(k yo\nk*1')
+        validate_data = self.client.post('/api/validate-sizes', json={
+            'sizes': self.SIZES, 'pattern': '(k yo\nk*1',
+        }).get_json()
+        verr = validate_data['sizes'][0]['error']
+        perr = preview_data['error']
+        self.assertEqual(perr['message'], verr['message'])
+        self.assertEqual(perr['char'], verr['char'])
+        self.assertEqual(perr['line'], verr['line'])
+
+    def test_blank_line_rejected(self):
+        data = self.preview(3, 0, 1)  # 第 3 行为空行
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'line')
+        self.assertEqual(data['error']['line'], 3)
+
+    def test_line_number_out_of_range(self):
+        for bad in [0, 5, -1, '1', 1.0, True, None]:
+            data = self.preview(bad, 0, 1)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'line', msg=repr(bad))
+
+    def test_empty_pattern_rejected(self):
+        data = self.preview(1, 0, 1, pattern='')
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'line')
+
+    def test_bad_size_index(self):
+        for bad in [-1, 3, '0', 1.0, True, None]:
+            data = self.preview(1, bad, 1)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'size_index',
+                             msg=repr(bad))
+
+    def test_bad_start(self):
+        for bad in [0, -3, '1', 1.5, True, None]:
+            data = self.preview(1, 0, bad)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'start', msg=repr(bad))
+
+    def test_start_beyond_total_reports_total(self):
+        data = self.preview(1, 0, 13)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'start')
+        self.assertEqual(data['error']['total'], 12)
+        self.assertIn('12', data['error']['message'])
+
+    def test_start_defaults_to_one(self):
+        data = self.client.post('/api/preview-row', json={
+            'sizes': self.SIZES, 'pattern': 'k*{12|16|20}',
+            'line': 1, 'size_index': 0,
+        }).get_json()
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['start'], 1)
+
+    def test_bad_sizes_rejected(self):
+        for bad in [None, [], [{'name': '', 'cast_on': 4}],
+                    [{'name': 'S', 'cast_on': 0}],
+                    [{'name': 'S', 'cast_on': 'x'}]]:
+            data = self.client.post('/api/preview-row', json={
+                'sizes': bad, 'pattern': 'k*4', 'line': 1,
+                'size_index': 0, 'start': 1,
+            }).get_json()
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'sizes', msg=repr(bad))
+
+    def test_preview_works_even_when_row_counts_do_not_balance(self):
+        # 预览只按语法定位，不要求该行针数与起针数匹配
+        data = self.preview(1, 0, 1,
+                            sizes=[{'name': 'S', 'cast_on': 99}],
+                            pattern='k*3')
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['total'], 3)
+        self.assertEqual(data['consume'], 3)
+
+    def test_nested_size_repeats_resolved_for_selected_size(self):
+        pattern = '((k yo)*{2|3} p)*{3|2}'
+        # S: 每组 (k yo)*2+p = 5 个，*3 -> 15；M: 每组 3 组 k yo +p = 7，*2 -> 14
+        s = self.preview(1, 0, 1,
+                         sizes=[{'name': 'S', 'cast_on': 1},
+                                {'name': 'M', 'cast_on': 1}],
+                         pattern=pattern)
+        m = self.preview(1, 1, 1,
+                         sizes=[{'name': 'S', 'cast_on': 1},
+                                {'name': 'M', 'cast_on': 1}],
+                         pattern=pattern)
+        self.assertEqual(s['total'], 15)
+        self.assertEqual(m['total'], 14)
+        self.assertEqual([i['stitch'] for i in m['items']][:5],
+                         ['k', 'yo', 'k', 'yo', 'k'])
+
+
 if __name__ == '__main__':
     unittest.main()

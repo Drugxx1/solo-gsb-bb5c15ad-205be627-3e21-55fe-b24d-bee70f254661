@@ -1,11 +1,15 @@
 import unittest
 
 from stitch_parser import (
+    PREVIEW_PAGE_SIZE,
     ParseError,
+    PreviewStartError,
     parse_row,
     parse_row_details,
+    parse_row_nodes,
     parse_row_sizes,
     parse_row_stitch_counts,
+    preview_row_stitches,
     reorder_size_multipliers,
     suggest_row_fix,
 )
@@ -327,6 +331,263 @@ class TestReorderSizeMultipliers(unittest.TestCase):
     def test_invalid_order_raises_value_error(self):
         with self.assertRaises(ValueError):
             reorder_size_multipliers('k*{1|2|3}', [0, 0, 1])
+
+
+def _expand_row(text, num_sizes, size_index):
+    """按尺码真正展开（仅测试辅助，不考虑性能），返回实际针法名序列。"""
+    names = []
+
+    def walk(nodes, copies):
+        for node in nodes:
+            reps = copies * node.mults[size_index]
+            if hasattr(node, 'name'):  # _StitchNode
+                names.extend([node.name] * reps)
+            else:
+                for _ in range(reps):
+                    walk(node.children, 1)
+
+    walk(parse_row_nodes(text, num_sizes), 1)
+    return names
+
+
+def _expected_items(text, num_sizes, size_index):
+    """逐个针法模拟：(seq, name, consume_before)。"""
+    before = 0
+    expected = []
+    for i, name in enumerate(_expand_row(text, num_sizes, size_index), 1):
+        consume = {'k': 1, 'p': 1, 'yo': 0, 'k2tog': 2}[name]
+        expected.append((i, name, before))
+        before += consume
+    return expected
+
+
+class TestPreviewRowStitches(unittest.TestCase):
+    def _all_pages(self, text, num_sizes, size_index):
+        """翻完所有页，拼接 (seq, name, consume_before)，返回 (末页, 序列)。"""
+        start = 1
+        seen = []
+        page = None
+        while True:
+            page = preview_row_stitches(text, num_sizes, size_index, start)
+            for item in page['items']:
+                seen.append((item['seq'], item['stitch'],
+                             item['consume_before']))
+            if page['next_start'] is None:
+                break
+            start = page['next_start']
+        return page, seen
+
+    def test_basic_row_items_and_ranges(self):
+        page = preview_row_stitches('k p yo k2tog', 1, 0, 1)
+        self.assertEqual(page['total'], 4)
+        self.assertIsNone(page['next_start'])
+        self.assertEqual(
+            [(i['seq'], i['stitch'], i['in_from'], i['in_to'], i['out'])
+             for i in page['items']],
+            [(1, 'k', 1, 1, 1),
+             (2, 'p', 2, 2, 2),
+             (3, 'yo', None, None, 3),
+             (4, 'k2tog', 3, 4, 4)])
+        self.assertEqual([i['consume_before'] for i in page['items']],
+                         [0, 1, 2, 2])
+
+    def test_repeat_group_ranges(self):
+        page = preview_row_stitches('(k2tog yo)*2', 1, 0, 1)
+        self.assertEqual(
+            [(i['seq'], i['stitch'], i['in_from'], i['in_to'])
+             for i in page['items']],
+            [(1, 'k2tog', 1, 2), (2, 'yo', None, None),
+             (3, 'k2tog', 3, 4), (4, 'yo', None, None)])
+
+    def test_nested_repeats(self):
+        # ((k yo)*2 k2tog)*3 -> k yo k yo k2tog ×3，共 15 个针法
+        page = preview_row_stitches('((k yo)*2 k2tog)*3', 1, 0, 1)
+        self.assertEqual(page['total'], 15)
+        self.assertEqual([i['stitch'] for i in page['items']],
+                         (['k', 'yo', 'k', 'yo', 'k2tog']) * 3)
+        # 第二组第一个 k 之前已消耗 4 针（k + k2tog：1+2，再加一个 k 共4）
+        self.assertEqual(page['items'][5]['in_from'], 5)
+        self.assertIsNone(page['next_start'])
+
+    def test_size_multipliers_resolved_per_size(self):
+        text = '(k2tog yo)*{6|8|10}'
+        for size_index, total in enumerate([12, 16, 20]):
+            page = preview_row_stitches(text, 3, size_index, 1)
+            self.assertEqual(page['total'], total)
+            self.assertEqual(page['consume'], total)
+            self.assertEqual(page['produce'], total)
+        tail = preview_row_stitches(text, 3, 2, 19)
+        self.assertEqual(
+            [(i['seq'], i['stitch'], i['in_from']) for i in tail['items']],
+            [(19, 'k2tog', 19), (20, 'yo', None)])
+
+    def test_nested_size_multiplier(self):
+        # (k*{2|3} yo)*2：S 共 6 个，M 共 8 个
+        page = preview_row_stitches('(k*{2|3} yo)*2', 2, 1, 1)
+        self.assertEqual(
+            [i['stitch'] for i in page['items']],
+            ['k', 'k', 'k', 'yo', 'k', 'k', 'k', 'yo'])
+
+    def test_zero_consume_yo_repeats(self):
+        # 回归：(yo)*3 共 3 个针法，不能因不消耗入针而坍缩成 1 个
+        page = preview_row_stitches('(yo)*3', 1, 0, 1)
+        self.assertEqual(page['total'], 3)
+        self.assertEqual([i['seq'] for i in page['items']], [1, 2, 3])
+        self.assertTrue(all(i['stitch'] == 'yo' for i in page['items']))
+        self.assertTrue(all(i['in_from'] is None for i in page['items']))
+        self.assertEqual([i['consume_before'] for i in page['items']],
+                         [0, 0, 0])
+
+    def test_huge_zero_consume_tail(self):
+        page = preview_row_stitches('(yo)*1000000000', 1, 0, 999999998)
+        self.assertEqual(page['total'], 1000000000)
+        self.assertEqual([i['seq'] for i in page['items']],
+                         [999999998, 999999999, 1000000000])
+
+    def test_zero_consume_group_mixed(self):
+        # (yo k)*2 -> yo k yo k：挂线标明插在第 0/1 针之后
+        page = preview_row_stitches('(yo k)*2', 1, 0, 1)
+        self.assertEqual(
+            [(i['seq'], i['stitch'], i['consume_before'], i['in_from'])
+             for i in page['items']],
+            [(1, 'yo', 0, None), (2, 'k', 0, 1),
+             (3, 'yo', 1, None), (4, 'k', 1, 2)])
+
+    def test_deep_nested_huge_tail(self):
+        # (((k yo)*1e6)*1e6)：2e12 个针法，直接取尾段
+        page = preview_row_stitches(
+            '(((k yo)*1000000)*1000000)', 1, 0, 2000000000000 - 1)
+        self.assertEqual(page['total'], 2000000000000)
+        self.assertEqual([(i['seq'], i['stitch']) for i in page['items']],
+                         [(1999999999999, 'k'), (2000000000000, 'yo')])
+
+    def test_pagination_page_size_and_navigation(self):
+        self.assertEqual(PREVIEW_PAGE_SIZE, 50)
+        first = preview_row_stitches('k*120', 1, 0, 1)
+        self.assertEqual(len(first['items']), 50)
+        self.assertEqual(first['items'][0]['seq'], 1)
+        self.assertEqual(first['items'][-1]['seq'], 50)
+        self.assertEqual(first['prev_start'], 1)
+        self.assertEqual(first['next_start'], 51)
+        second = preview_row_stitches('k*120', 1, 0, 51)
+        self.assertEqual(len(second['items']), 50)
+        self.assertEqual(second['prev_start'], 1)
+        third = preview_row_stitches('k*120', 1, 0, 101)
+        self.assertEqual(len(third['items']), 20)
+        self.assertIsNone(third['next_start'])
+        self.assertEqual(third['items'][-1]['seq'], 120)
+
+    def test_start_in_middle_of_page(self):
+        # 从非整页边界开始：本页 50 个，上一页起点回退 50
+        page = preview_row_stitches('k*200', 1, 0, 60)
+        self.assertEqual([i['seq'] for i in page['items']], list(range(60, 110)))
+        self.assertEqual(page['prev_start'], 10)
+        self.assertEqual(page['next_start'], 110)
+
+    def test_paging_covers_every_stitch(self):
+        cases = [
+            ('k p yo k2tog', 1, 0),
+            ('(k2tog yo)*6', 1, 0),
+            ('((k yo)*2 k2tog)*3', 1, 0),
+            ('(k2tog yo)*{6|8|10}', 3, 0),
+            ('(k2tog yo)*{6|8|10}', 3, 1),
+            ('(k2tog yo)*{6|8|10}', 3, 2),
+            ('((k yo)*{2|3|4} p)*{3|2|1}', 3, 2),
+            ('k2tog*60 yo (p)*60', 1, 0),
+            ('(yo)*5 k*3', 1, 0),
+            ('(yo)*60 (k)*60', 1, 0),
+            ('(yo k)*100', 1, 0),
+        ]
+        for text, nsz, si in cases:
+            page, seen = self._all_pages(text, nsz, si)
+            self.assertEqual(seen, _expected_items(text, nsz, si), msg=text)
+            self.assertEqual(page['consume'],
+                             parse_row_sizes(text, nsz)[0][si])
+            self.assertEqual(page['produce'],
+                             parse_row_sizes(text, nsz)[1][si])
+
+    def test_each_items_in_out_ranges(self):
+        # 非挂线针法入针范围宽度与其消耗一致；每个针法出针序号等于操作序号
+        text = '((k2tog)*2 yo)*2 (p yo k)*2'
+        page = preview_row_stitches(text, 1, 0, 1)
+        for item in page['items']:
+            self.assertEqual(item['out'], item['seq'])
+            if item['stitch'] == 'yo':
+                self.assertIsNone(item['in_from'])
+                self.assertIsNone(item['in_to'])
+            else:
+                width = item['in_to'] - item['in_from'] + 1
+                self.assertEqual(width, {'k': 1, 'p': 1,
+                                         'k2tog': 2}[item['stitch']])
+
+    def test_huge_repeat_tail_without_expansion(self):
+        page = preview_row_stitches('(k yo)*1000000000', 1, 0, 1999999997)
+        self.assertEqual(page['total'], 2000000000)
+        self.assertEqual(
+            [(i['seq'], i['stitch'], i['in_from']) for i in page['items']],
+            [(1999999997, 'k', 999999999),
+             (1999999998, 'yo', None),
+             (1999999999, 'k', 1000000000),
+             (2000000000, 'yo', None)])
+
+    def test_huge_size_multiplier_tail(self):
+        page = preview_row_stitches('k2tog*{1000000000|2}', 2, 0, 999999999)
+        self.assertEqual(page['total'], 1000000000)
+        self.assertEqual((page['items'][0]['in_from'],
+                          page['items'][0]['in_to']),
+                         (1999999997, 1999999998))
+
+    def test_huge_repeat_pagination(self):
+        first = preview_row_stitches('k*1000000000', 1, 0, 1)
+        self.assertEqual(first['next_start'], 51)
+        tail_start = 1000000000 - 49
+        tail = preview_row_stitches('k*1000000000', 1, 0, tail_start)
+        self.assertEqual(len(tail['items']), 50)
+        self.assertIsNone(tail['next_start'])
+        self.assertEqual(tail['items'][0]['in_from'], tail_start)
+        self.assertEqual(tail['items'][-1]['out'], 1000000000)
+        self.assertEqual(tail['prev_start'], tail_start - 50)
+
+    def test_start_beyond_total_raises(self):
+        with self.assertRaises(PreviewStartError) as ctx:
+            preview_row_stitches('k*3', 1, 0, 4)
+        self.assertEqual(ctx.exception.total, 3)
+
+    def test_invalid_start_raises_value_error(self):
+        for bad in [0, -1, '1', 1.0, True, None]:
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                preview_row_stitches('k', 1, 0, bad)
+
+    def test_invalid_size_index_raises_value_error(self):
+        for bad in [-1, 2, 3, '0', 0.0, True]:
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                preview_row_stitches('k*{1|2}', 2, bad, 1)
+
+    def test_parse_error_is_same_error_and_position(self):
+        # 非法行返回与 parse_row_details 相同的 ParseError 与字符位置
+        for bad in ['ssk', '(k yo', 'k)', '()', 'k*0', 'k*{1}']:
+            with self.assertRaises(ParseError, msg=bad) as ctx_preview:
+                preview_row_stitches(bad, 2, 0, 1)
+            with self.assertRaises(ParseError) as ctx_parse:
+                parse_row_details(bad, 2)
+            self.assertEqual(str(ctx_preview.exception),
+                             str(ctx_parse.exception), msg=bad)
+            self.assertEqual(ctx_preview.exception.pos,
+                             ctx_parse.exception.pos, msg=bad)
+
+    def test_empty_row_is_parse_error(self):
+        with self.assertRaises(ParseError):
+            preview_row_stitches('   ', 1, 0, 1)
+
+    def test_node_tree_arithmetic_matches_details(self):
+        # ((k yo)*2 k2tog)*3：每组消耗4产出5，*3 -> 消耗12产出15；
+        # k*{2|3} -> 消耗/产出各 +2/+3
+        text = '((k yo)*2 k2tog)*3 k*{2|3}'
+        nodes = parse_row_nodes(text, 2)
+        c, p, tallies = parse_row_details(text, 2)
+        self.assertEqual((c, p), ([14, 15], [17, 18]))
+        self.assertEqual(len(nodes), 2)
+        self.assertEqual(tallies['k'], [8, 9])
 
 
 if __name__ == '__main__':
