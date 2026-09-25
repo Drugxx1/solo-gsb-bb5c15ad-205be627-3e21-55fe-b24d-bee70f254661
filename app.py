@@ -34,6 +34,21 @@ POST /api/move-size       尺码上移/下移，并同步重排指令中的按�
     任一处按尺码倍数项数或数值不合法时整次移动不生效，reorder 错误带原文
     行号 "line" 与字符位置 "char"（均从 1 计）。
 
+POST /api/preview-row      单行针位预览（不展开重复，十亿次重复可直接看尾段）
+  请求: {"sizes": [...], "pattern": "...", "line": 1, "size": 0, "start": 1}
+    line 为图解原文行号（1 起），size 为所选尺码下标（0 起，默认 0），
+    start 为起始操作序号（1 起，默认 1），每页最多 50 个实际针法。
+  成功: {"ok": true, "line", "instruction", "size", "size_name",
+         "total_stitches", "total_consume", "total_produce", "page_size",
+         "start", "end", "has_prev", "has_next", "prev_start", "next_start",
+         "stitches": [{"seq", "stitch", "in_start", "in_end", "out_start",
+                       "out_end", "insert_after"}, ...]}
+    入针范围为该行行内 1 起编号；零入针（挂线 yo）的 in_start/in_end 为
+    null，insert_after 标明插入在已消耗第几针之后（0=第 1 针之前）。
+  失败: {"ok": false, "error": {"type": "sizes"|"line"|"size"|"start"|"parse",...}}
+    非法行沿用现有解析错误（parse，带原文行号 line 与字符位置 char），
+    不返回任何部分预览。
+
 逐行推算规则：每个尺码独立地以上一行的产出作为下一行的可用针数；某尺码
 消耗与可用针数不一致（不足或超出）时，仅该尺码停止并记录行号与差额，
 其余尺码继续推算。指令本身无法解析（含 *{a|b} 项数与尺码数不符、倍数
@@ -63,8 +78,11 @@ from flask import Flask, jsonify, render_template, request
 from stitch_parser import (
     STITCH_NAMES,
     ParseError,
+    PREVIEW_PAGE_SIZE,
+    build_stitch_plan,
     parse_row,
     parse_row_details,
+    plan_stitch_page,
     reorder_size_multipliers,
     suggest_row_fix,
 )
@@ -451,6 +469,115 @@ def move_size():
     for new_idx, old_idx in enumerate(order):
         new_sizes[new_idx] = sizes[old_idx]
     return jsonify({"ok": True, "sizes": new_sizes, "pattern": new_pattern})
+
+
+def _preview_error_obj(err_type, message, line=None, char=None):
+    """构造针位预览的错误对象；parse 错误可附带原文行号与字符位置。"""
+    err = {"type": err_type, "message": message}
+    if line is not None:
+        err["line"] = line
+    if char is not None:
+        err["char"] = char
+    return err
+
+
+@app.post("/api/preview-row")
+def preview_row():
+    """单行针位预览：按图解原文行、尺码与起始操作序号返回一页实际针法。
+
+    请求: {"sizes": [...], "pattern": "...", "line": 1, "size": 0, "start": 1}
+    line 为原文行号（1 起），size 为尺码下标（0 起），start 为起始操作序号
+    （1 起），每页最多 PREVIEW_PAGE_SIZE 个针法。嵌套重复与按尺码倍数按所选
+    尺码算术定位、跳过未显示的重复段，不展开整行；非法行返回现有解析错误与
+    原文位置，不给部分预览。
+    """
+    data = request.get_json(silent=True) or {}
+
+    sizes, err = _parse_sizes(data.get("sizes"))
+    if err:
+        return jsonify({
+            "ok": False,
+            "error": _preview_error_obj("sizes", err),
+        })
+    num_sizes = len(sizes)
+
+    pattern = data.get("pattern", "")
+    if not isinstance(pattern, str):
+        pattern = str(pattern)
+
+    line = data.get("line")
+    if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+        return jsonify({
+            "ok": False,
+            "error": _preview_error_obj("line", "行号必须为从 1 开始的正整数"),
+        })
+
+    raw_lines = pattern.splitlines()
+    if line > len(raw_lines):
+        return jsonify({
+            "ok": False,
+            "error": _preview_error_obj(
+                "line", "行号超出原文范围（共 {} 行）".format(len(raw_lines))),
+        })
+    text = raw_lines[line - 1].strip()
+    if not text:  # 空行不是指令，无法预览
+        return jsonify({
+            "ok": False,
+            "error": _preview_error_obj("line", "第 {} 行为空，没有可预览的指令".format(line)),
+        })
+
+    size_index = data.get("size", 0)
+    if isinstance(size_index, bool) or not isinstance(size_index, int) \
+            or not (0 <= size_index < num_sizes):
+        return jsonify({
+            "ok": False,
+            "error": _preview_error_obj(
+                "size", "尺码下标必须在 0..{} 之间".format(num_sizes - 1)),
+        })
+
+    # 先按当前输入与解析语法构造计划：非法行在此抛出现有 ParseError（带位置）
+    try:
+        plan = build_stitch_plan(text, num_sizes, size_index)
+    except ParseError as exc:
+        return jsonify({
+            "ok": False,
+            "error": _parse_error_obj(line, text, exc),
+        })
+
+    start = data.get("start", 1)
+    if isinstance(start, bool) or not isinstance(start, int) or start < 1:
+        return jsonify({
+            "ok": False,
+            "error": _preview_error_obj("start", "起始操作序号必须为正整数"),
+        })
+    if start > plan.total_stitches:
+        return jsonify({
+            "ok": False,
+            "error": _preview_error_obj(
+                "start", "起始序号超出该行实际针法总数（共 {} 个）".format(
+                    plan.total_stitches)),
+        })
+
+    stitches = plan_stitch_page(plan, start, PREVIEW_PAGE_SIZE)
+    end = start + len(stitches) - 1
+    return jsonify({
+        "ok": True,
+        "line": line,
+        "instruction": text,
+        "size": size_index,
+        "size_name": sizes[size_index]["name"],
+        "total_stitches": plan.total_stitches,
+        "total_consume": plan.total_consume,
+        "total_produce": plan.total_produce,
+        "page_size": PREVIEW_PAGE_SIZE,
+        "start": start,
+        "end": end,
+        "has_prev": start > 1,
+        "has_next": end < plan.total_stitches,
+        "prev_start": max(1, start - PREVIEW_PAGE_SIZE),
+        "next_start": end + 1 if end < plan.total_stitches else None,
+        "stitches": stitches,
+    })
 
 
 def _yarn_summary(yarn, state):

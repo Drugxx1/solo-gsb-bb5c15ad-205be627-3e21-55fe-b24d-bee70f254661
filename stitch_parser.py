@@ -25,6 +25,13 @@ reorder_size_multipliers 在尺码顺序调整（上移/下移）时，按新顺
 中所有 *{a|b|...} 的倍数项：嵌套重复与同一行多处都会处理，普通 *n 与其他
 原文保持不变；任一处项数或数值不合法时抛 ParseError 并给出字符位置，调用
 方可据此中止整次移动。
+
+单行针位预览（build_stitch_plan / plan_stitch_page）：把一行指令解析成带
+倍数信息的语法树（不展开重复），再按所选尺码为每个节点算出该尺码下的消耗/
+产出与重复次数。翻页时用算术定位直接跳过起始序号之前的整段重复（含嵌套与
+按尺码倍数），只逐个生成当前页的实际针法：每个针法给出消耗的入针范围
+（行内 1 起）与产出的出针位置，挂线（yo）零入针，额外给出 insert_after
+标明插入在已消耗的第几针之后。因此 (k)*1000000000 也能直接查看尾段。
 """
 
 import re
@@ -455,3 +462,315 @@ def reorder_size_multipliers(text, order):
     for (s, e), replacement in reversed(edits):
         result = result[:s] + replacement + result[e:]
     return result
+
+
+# ---------------------------------------------------------------------------
+# 单行针位预览：带倍数的语法树 + 算术定位（不展开重复）
+# ---------------------------------------------------------------------------
+
+class _Ast(object):
+    """语法树节点：叶子为单个记号，组节点为括号序列。
+
+    values 为 None（普通 *n，对所有尺码同倍数）或长度 num_sizes 的倍数列表；
+    rep/c/p 由 _annotate 按所选尺码填入：rep 为该节点在该尺码下的重复次数，
+    c/p 为该节点一次出现（不乘 rep）在该尺码下的消耗/产出针数。
+    """
+
+    __slots__ = ('kind', 'name', 'children', 'values', 'rep', 'c', 'p')
+
+    def __init__(self, kind, name=None, children=None, values=None):
+        self.kind = kind          # 'leaf' 或 'group'
+        self.name = name          # 叶子：记号名（小写）
+        self.children = children  # 组节点：子节点列表
+        self.values = values      # 倍数：None=普通 *1/无倍数，list=按尺码
+        self.rep = 1
+        self.c = 0
+        self.p = 0
+
+
+class _AstParser(object):
+    """由词法 token 构造 _Ast 树。仅供已通过 parse_row_details 的行使用：
+
+    语法已确认合法，这里不重复报错，只按同一语法重新建树。
+    """
+
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.i = 0
+
+    def peek(self):
+        return self.tokens[self.i] if self.i < len(self.tokens) else None
+
+    def advance(self):
+        tok = self.peek()
+        self.i += 1
+        return tok
+
+    def parse(self):
+        children = self.parse_sequence()
+        return _Ast('group', children=children, values=None)
+
+    def parse_sequence(self):
+        nodes = []
+        while True:
+            tok = self.peek()
+            if tok is None or tok[0] not in ('STITCH', 'LPAREN'):
+                break
+            nodes.append(self.parse_item())
+        return nodes
+
+    def parse_item(self):
+        kind, val, _pos = self.advance()
+        if kind == 'STITCH':
+            node = _Ast('leaf', name=val.lower(), values=None)
+        else:  # LPAREN，合法性已由解析器确认：必有 ')'
+            node = _Ast('group', children=self.parse_sequence(), values=None)
+            self.advance()  # RPAREN
+        tok = self.peek()
+        if tok is not None and tok[0] == 'STAR':
+            self.advance()
+            node.values = self.parse_repeat_values()
+        return node
+
+    def parse_repeat_values(self):
+        """ '*' 之后的倍数：返回 [int, ...]（普通 *n 为单元素列表）。"""
+        tok = self.advance()
+        if tok[0] == 'NUM':
+            return [int(tok[1])]
+        # LBRACE：收集到 RBRACE 为止的数字（合法性已确认，项数等于尺码数）
+        values = []
+        while True:
+            tok = self.advance()
+            if tok[0] == 'NUM':
+                values.append(int(tok[1]))
+            elif tok[0] == 'RBRACE':
+                break
+        return values
+
+
+def _annotate(node, size_index):
+    """按所选尺码为节点填入 rep/c/p（一次出现的消耗/产出，不乘 rep）。"""
+    if node.kind == 'leaf':
+        c0, p0 = STITCH_COUNTS[node.name]
+        node.c, node.p = c0, p0
+    else:
+        c = p = 0
+        for child in node.children:
+            _annotate(child, size_index)
+            c += child.c * child.rep
+            p += child.p * child.rep
+        node.c, node.p = c, p
+    if node.values is None:
+        node.rep = 1
+    elif len(node.values) == 1:
+        node.rep = node.values[0]  # 普通 *n 对所有尺码同倍数
+    else:
+        node.rep = node.values[size_index]  # 按尺码取倍数
+
+
+class StitchPlan(object):
+    """一行在所选尺码下的针位预览计划（算术累计，未展开任何重复）。
+
+    total_stitches 为该尺码下整行实际针法总数；total_consume/total_produce
+    为整行入针/出针总数（与 parse_row_details 结果一致）。
+    """
+
+    __slots__ = ('root', 'total_consume', 'total_produce', 'total_stitches')
+
+    def __init__(self, root):
+        self.root = root
+        self.total_consume = root.c * root.rep
+        self.total_produce = root.p * root.rep
+        total = 0
+        for child in root.children:
+            total += _subtree_leaf_count(child)
+        self.total_stitches = total
+
+
+def _subtree_leaf_count(node):
+    """节点（含自身重复）覆盖的实际针法数。"""
+    if node.kind == 'leaf':
+        return node.rep
+    total = 0
+    for child in node.children:
+        total += _subtree_leaf_count(child)
+    return total * node.rep
+
+
+def build_stitch_plan(text, num_sizes, size_index):
+    """把一行指令解析成所选尺码下的 StitchPlan（非法行抛 ParseError）。
+
+    先以当前输入与解析语法完整校验：行无法解析（含倍数项数与尺码数不符、
+    倍数非法等）时抛出现有 ParseError（含字符位置），不产生部分预览。
+    嵌套重复与按尺码倍数随后按所选尺码定位（_annotate），全程不展开重复。
+    """
+    if num_sizes < 1:
+        raise ValueError("num_sizes 必须为正整数")
+    if not (0 <= size_index < num_sizes):
+        raise ValueError("size_index 超出尺码范围")
+    # 先做完整语法/算术校验，非法行在此处抛出带位置的 ParseError
+    parse_row_details(text, num_sizes)
+    tokens = _tokenize(text)
+    root = _AstParser(tokens).parse()
+    _annotate(root, size_index)
+    return StitchPlan(root)
+
+
+class _Frame(object):
+    """延迟展开的遍历栈帧。
+
+    组帧：(node, occ, idx) 表示停在第 occ 次出现（0 起）的第 idx 个子节点前；
+    叶帧：(node, occ) 表示下一个可取的是该叶子的第 occ 次出现（0 起）。
+    """
+
+    __slots__ = ('node', 'occ', 'idx')
+
+    def __init__(self, node, occ=0, idx=0):
+        self.node = node
+        self.occ = occ
+        self.idx = idx
+
+
+def _subtree_consume(node):
+    """节点整段（含自身重复）的消耗针数。"""
+    return node.c * node.rep
+
+
+def _subtree_produce(node):
+    """节点整段（含自身重复）的产出针数。"""
+    return node.p * node.rep
+
+
+def _advance_parent(stack):
+    """子帧刚耗尽弹出：父组帧前进到下一个子节点（根帧弹出时栈空）。"""
+    if stack and stack[-1].node.kind == 'group':
+        stack[-1].idx += 1
+
+
+def seek_frames(stack, skip):
+    """把遍历状态算术推进 skip 个实际针法，返回跳过部分的 (消耗, 产出)。
+
+    整段子节点按 child.c*child.rep 一次算完，整段重复按每次出现的消耗/产出
+    乘以次数算完，绝不逐次迭代重复，因此十亿次重复只做常数级运算；不足
+    一整段时才压入子帧（嵌套深度有限）。推进后的栈帧状态可直接供 next_leaf 使用。
+    """
+    done_c = done_p = 0
+    while skip > 0 and stack:
+        frame = stack[-1]
+        node = frame.node
+        if node.kind == 'leaf':
+            take = min(skip, node.rep - frame.occ)
+            frame.occ += take
+            done_c += take * node.c
+            done_p += take * node.p
+            skip -= take
+            if frame.occ >= node.rep:
+                stack.pop()
+                _advance_parent(stack)
+            continue
+        # 组帧：先整段跳过当前出现中 idx 之后的子节点
+        inner_broke = False
+        while frame.idx < len(node.children):
+            child = node.children[frame.idx]
+            count = _subtree_leaf_count(child)
+            if skip >= count:
+                done_c += _subtree_consume(child)
+                done_p += _subtree_produce(child)
+                skip -= count
+                frame.idx += 1
+            else:
+                stack.append(_Frame(child))  # 不足一整段：进入子帧由外层继续
+                inner_broke = True
+                break
+        if inner_broke:
+            continue
+        # 当前出现已耗尽：先计入这一出现，再整段跳过后续完整重复
+        per_n = sum(_subtree_leaf_count(c) for c in node.children)
+        per_c = sum(_subtree_consume(c) for c in node.children)
+        per_p = sum(_subtree_produce(c) for c in node.children)
+        frame.occ += 1
+        frame.idx = 0
+        remaining = node.rep - frame.occ
+        full = min(skip // per_n, remaining)
+        done_c += full * per_c
+        done_p += full * per_p
+        skip -= full * per_n
+        frame.occ += full
+        if frame.occ >= node.rep:
+            stack.pop()
+            _advance_parent(stack)
+        # skip==0 且帧仍在：停在下一出现的开头，该出现尚未消耗
+    return done_c, done_p
+
+
+def next_leaf(stack):
+    """取下一个实际针法叶子（返回 _Ast）；遍历结束返回 None。
+
+    只沿栈帧定位：叶子逐次返回，组节点负责进入子节点与推进重复出现，
+    不预先展开任何重复段。
+    """
+    while stack:
+        frame = stack[-1]
+        node = frame.node
+        if node.kind == 'leaf':
+            if frame.occ < node.rep:
+                frame.occ += 1
+                return node
+            stack.pop()
+            _advance_parent(stack)
+            continue
+        if frame.idx >= len(node.children):
+            # 当前出现的子节点已取完：进入下一出现
+            frame.occ += 1
+            frame.idx = 0
+            if frame.occ >= node.rep:
+                stack.pop()
+                _advance_parent(stack)
+            continue
+        stack.append(_Frame(node.children[frame.idx]))
+    return None
+
+
+PREVIEW_PAGE_SIZE = 50
+
+
+def plan_stitch_page(plan, start, limit=PREVIEW_PAGE_SIZE):
+    """返回从第 start 个（1 起）实际针法开始的一页针位条目，最多 limit 个。
+
+    start 必须为 1..total_stitches 的正整数（由调用方校验）。每个条目：
+      {"seq", "stitch", "in_start", "in_end", "out_start", "out_end",
+       "insert_after"}
+    in_start/in_end 为该针法消耗的行内入针范围（1 起）；零入针（yo）时为
+    None，并以 insert_after 标明挂线插入在已消耗的第几针之后（0 表示第 1
+    针之前）。出针范围对现有记号恰好 1 针（out_start == out_end）。
+    """
+    if not isinstance(start, int) or isinstance(start, bool) or start < 1:
+        raise ValueError("start 必须为正整数")
+    if start > plan.total_stitches:
+        raise ValueError("start 超出该行实际针法总数")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("limit 必须为正整数")
+
+    stack = [_Frame(plan.root)]
+    consumed, produced = seek_frames(stack, start - 1)
+
+    entries = []
+    while len(entries) < limit:
+        leaf = next_leaf(stack)
+        if leaf is None:
+            break
+        seq = start + len(entries)
+        in_start = consumed + 1 if leaf.c > 0 else None
+        in_end = consumed + leaf.c if leaf.c > 0 else None
+        entries.append({
+            "seq": seq,
+            "stitch": leaf.name,
+            "in_start": in_start,
+            "in_end": in_end,
+            "out_start": produced + 1,
+            "out_end": produced + leaf.p,
+            "insert_after": consumed if leaf.name == 'yo' else None,
+        })
+        consumed += leaf.c
+        produced += leaf.p
+    return entries

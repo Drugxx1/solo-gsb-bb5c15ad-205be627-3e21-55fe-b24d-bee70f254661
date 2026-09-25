@@ -91,6 +91,7 @@ function updateRowButtons() {
     row.querySelector('.move-up').disabled = i === 0;
     row.querySelector('.move-down').disabled = i === rows.length - 1;
   });
+  refreshPreviewControls();
 }
 
 function readSizes() {
@@ -168,6 +169,7 @@ async function moveSize(row, direction) {
   const dirText = direction === 'up' ? '上移' : '下移';
   showMoveMessage(
     '已' + dirText + '尺码，指令中的 *{...} 倍数项已按新顺序同步重排。', true);
+  refreshPreviewControls();
   form.requestSubmit();  // 移动后自动重新校验：各尺码针数与移动前一致
 }
 
@@ -189,9 +191,13 @@ document.getElementById('fill-example').addEventListener('click', () => {
   }
   patternInput.value = EXAMPLE_PATTERN;
   hideMoveMessage();
+  refreshPreviewControls();
 });
 
-patternInput.addEventListener('input', hideMoveMessage);
+patternInput.addEventListener('input', () => {
+  hideMoveMessage();
+  refreshPreviewControls();
+});
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -411,7 +417,231 @@ function buildRowsTable(rows, withYarn) {
   return table;
 }
 
-// 初始填入示例尺码，便于直接体验
+// ---------------------------------------------------------------------------
+// 单行针位预览
+// ---------------------------------------------------------------------------
+
+const PREVIEW_PAGE_SIZE = 50;
+
+const previewLineSelect = document.getElementById('preview-line');
+const previewSizeSelect = document.getElementById('preview-size');
+const previewStartInput = document.getElementById('preview-start');
+const previewGoBtn = document.getElementById('preview-go');
+const previewMessage = document.getElementById('preview-message');
+const previewResult = document.getElementById('preview-result');
+const previewSummary = document.getElementById('preview-summary');
+const previewTbody = document.querySelector('#preview-table tbody');
+const previewPageInfo = document.getElementById('preview-page-info');
+const previewFirstBtn = document.getElementById('preview-first');
+const previewPrevBtn = document.getElementById('preview-prev');
+const previewNextBtn = document.getElementById('preview-next');
+const previewLastBtn = document.getElementById('preview-last');
+
+const STITCH_LABELS = {
+  k: '下针',
+  p: '上针',
+  yo: '挂线',
+  k2tog: '两针并一针',
+};
+
+// 当前预览页状态（用于上一页/下一页与尾页跳转）
+const previewState = { line: null, size: 0, start: 1, end: 1, total: 0, pageSize: PREVIEW_PAGE_SIZE };
+
+function refreshPreviewControls() {
+  // 行号选项：保留非空行，值为原文行号（1 起）
+  const prevLine = previewLineSelect.value;
+  previewLineSelect.replaceChildren();
+  const lines = patternInput.value.split('\n');
+  let found = false;
+  lines.forEach((raw, i) => {
+    const text = raw.trim();
+    if (!text) {
+      return;
+    }
+    const option = document.createElement('option');
+    option.value = String(i + 1);
+    option.textContent = '第 ' + (i + 1) + ' 行：' +
+      (text.length > 40 ? text.slice(0, 40) + '…' : text);
+    previewLineSelect.appendChild(option);
+    if (String(i + 1) === prevLine) {
+      option.selected = true;
+      found = true;
+    }
+  });
+  if (prevLine !== '' && found) {
+    previewLineSelect.value = prevLine;
+  }
+  previewState.line = previewLineSelect.value ? Number(previewLineSelect.value) : null;
+
+  // 尺码选项：顺序即 *{a|b|c} 取倍数的顺序
+  const prevSize = previewSizeSelect.value;
+  previewSizeSelect.replaceChildren();
+  const sizes = readSizes();
+  sizes.forEach((s, i) => {
+    const option = document.createElement('option');
+    option.value = String(i);
+    option.textContent = (s.name && s.name.trim()) ? s.name.trim() : '尺码 ' + (i + 1);
+    previewSizeSelect.appendChild(option);
+  });
+  if (prevSize !== '' && Number(prevSize) < sizes.length) {
+    previewState.size = Number(prevSize);
+  } else {
+    previewState.size = 0;
+  }
+  previewSizeSelect.value = String(previewState.size);
+
+  // 输入变化后旧预览不再可信，隐藏结果与提示
+  hidePreviewMessage();
+  previewResult.hidden = true;
+}
+
+function showPreviewMessage(text) {
+  previewMessage.textContent = text;
+  previewMessage.className = 'preview-message error';
+  previewMessage.hidden = false;
+}
+
+function hidePreviewMessage() {
+  previewMessage.hidden = true;
+  previewMessage.textContent = '';
+}
+
+async function requestPreview(start) {
+  hidePreviewMessage();
+  if (previewLineSelect.value === '') {
+    showPreviewMessage('图解中还没有可预览的非空行，请先填写至少一行指令。');
+    previewResult.hidden = true;
+    return;
+  }
+  if (!Number.isInteger(start) || start < 1) {
+    showPreviewMessage('起始操作序号必须为正整数。');
+    return;
+  }
+  previewStartInput.value = String(start);
+
+  let data;
+  try {
+    const res = await fetch('/api/preview-row', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sizes: readSizes(),
+        pattern: patternInput.value,
+        line: Number(previewLineSelect.value),
+        size: Number(previewSizeSelect.value),
+        start,
+      }),
+    });
+    data = await res.json();
+  } catch (err) {
+    showPreviewMessage('预览请求失败：' + err.message);
+    previewResult.hidden = true;
+    return;
+  }
+
+  if (!data.ok) {
+    // 非法行等错误：不显示任何部分预览
+    showPreviewMessage(formatPreviewError(data.error));
+    previewResult.hidden = true;
+    return;
+  }
+  renderPreview(data);
+}
+
+function formatPreviewError(err) {
+  if (!err) {
+    return '预览失败：未知错误';
+  }
+  if (err.type === 'parse') {
+    const where = err.char ? '（第 ' + err.char + ' 个字符）' : '';
+    return '第 ' + err.line + ' 行指令无法解析' + where + '：' + err.message;
+  }
+  return '预览失败：' + err.message;
+}
+
+function formatRange(first, last) {
+  if (first === null || first === undefined) {
+    return '—（零入针）';
+  }
+  return first === last ? String(first) : first + '–' + last;
+}
+
+function yoInsertNote(insertAfter) {
+  return insertAfter === 0 ? '挂线插入第 1 针之前（零入针）'
+    : '挂线插入第 ' + insertAfter + ' 针之后（零入针）';
+}
+
+function renderPreview(data) {
+  previewState.line = data.line;
+  previewState.size = data.size;
+  previewState.start = data.start;
+  previewState.end = data.end;
+  previewState.total = data.total_stitches;
+  previewState.pageSize = data.page_size;
+
+  previewSummary.textContent =
+    '第 ' + data.line + ' 行 ' + data.instruction + '（尺码 ' + data.size_name + '）：' +
+    '共 ' + data.total_stitches.toLocaleString('zh-CN') + ' 个实际针法，' +
+    '行内共消耗 ' + data.total_consume.toLocaleString('zh-CN') + ' 针入针、' +
+    '产出 ' + data.total_produce.toLocaleString('zh-CN') + ' 针出针。';
+
+  previewTbody.replaceChildren();
+  for (const st of data.stitches) {
+    const tr = document.createElement('tr');
+    tr.className = st.stitch === 'yo' ? 'preview-yo' : '';
+    const cells = [
+      String(st.seq),
+      st.stitch + '（' + (STITCH_LABELS[st.stitch] || '') + '）',
+      formatRange(st.in_start, st.in_end),
+      formatRange(st.out_start, st.out_end),
+      st.stitch === 'yo' ? yoInsertNote(st.insert_after) : '—',
+    ];
+    for (const value of cells) {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.appendChild(td);
+    }
+    previewTbody.appendChild(tr);
+  }
+
+  previewPageInfo.textContent = '第 ' +
+    data.start.toLocaleString('zh-CN') + '–' + data.end.toLocaleString('zh-CN') +
+    ' 个 / 共 ' + data.total_stitches.toLocaleString('zh-CN') + ' 个';
+  previewFirstBtn.disabled = !data.has_prev;
+  previewPrevBtn.disabled = !data.has_prev;
+  previewNextBtn.disabled = !data.has_next;
+  previewLastBtn.disabled = !data.has_next;
+  previewResult.hidden = false;
+}
+
+previewGoBtn.addEventListener('click', () => {
+  const start = Math.floor(Number(previewStartInput.value));
+  requestPreview(Number.isFinite(start) ? start : 1);
+});
+previewStartInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    previewGoBtn.click();
+  }
+});
+previewLineSelect.addEventListener('change', () => {
+  previewResult.hidden = true;
+  hidePreviewMessage();
+});
+previewSizeSelect.addEventListener('change', () => {
+  previewResult.hidden = true;
+  hidePreviewMessage();
+});
+previewFirstBtn.addEventListener('click', () => requestPreview(1));
+previewPrevBtn.addEventListener('click', () =>
+  requestPreview(Math.max(1, previewState.start - previewState.pageSize)));
+previewNextBtn.addEventListener('click', () =>
+  requestPreview(previewState.end + 1));
+previewLastBtn.addEventListener('click', () =>
+  requestPreview(previewState.total -
+    ((previewState.total - 1) % previewState.pageSize)));
+
+// 初始填入示例尺码，便于直接体验（放在最后：addSizeRow 会刷新预览控件）
 for (const s of EXAMPLE_SIZES) {
   addSizeRow(s.name, s.cast_on);
 }

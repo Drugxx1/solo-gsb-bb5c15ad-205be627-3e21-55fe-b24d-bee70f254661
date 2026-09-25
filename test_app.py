@@ -564,5 +564,187 @@ class TestMoveSizeApi(unittest.TestCase):
         self.assertEqual(data['error']['type'], 'move')
 
 
+class TestPreviewRowApi(unittest.TestCase):
+    SIZES = [{'name': 'S', 'cast_on': 12},
+             {'name': 'M', 'cast_on': 16},
+             {'name': 'L', 'cast_on': 20}]
+
+    def setUp(self):
+        self.client = app.test_client()
+
+    def preview(self, sizes, pattern, line, size=0, start=1):
+        return self.client.post('/api/preview-row', json={
+            'sizes': sizes, 'pattern': pattern,
+            'line': line, 'size': size, 'start': start,
+        }).get_json()
+
+    def test_first_page_entries(self):
+        data = self.preview(self.SIZES, '(k2tog yo)*{6|8|10}\np*3', 1, 0, 1)
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['line'], 1)
+        self.assertEqual(data['instruction'], '(k2tog yo)*{6|8|10}')
+        self.assertEqual(data['size'], 0)
+        self.assertEqual(data['size_name'], 'S')
+        self.assertEqual(data['total_stitches'], 12)
+        self.assertEqual(data['total_consume'], 12)
+        self.assertEqual(data['total_produce'], 12)
+        self.assertEqual(data['page_size'], 50)
+        self.assertEqual(data['start'], 1)
+        self.assertEqual(data['end'], 12)
+        self.assertFalse(data['has_prev'])
+        self.assertFalse(data['has_next'])
+        self.assertIsNone(data['next_start'])
+        first = data['stitches'][0]
+        self.assertEqual(first['stitch'], 'k2tog')
+        self.assertEqual((first['in_start'], first['in_end']), (1, 2))
+        self.assertEqual((first['out_start'], first['out_end']), (1, 1))
+        yo = data['stitches'][1]
+        self.assertEqual(yo['stitch'], 'yo')
+        self.assertIsNone(yo['in_start'])
+        self.assertIsNone(yo['in_end'])
+        self.assertEqual(yo['insert_after'], 2)
+        self.assertEqual((yo['out_start'], yo['out_end']), (2, 2))
+
+    def test_selected_size_locates_size_multipliers(self):
+        # M（size=1）：(k2tog yo)*8 -> 16 个针法
+        data = self.preview(self.SIZES, '(k2tog yo)*{6|8|10}', 1, 1)
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['size_name'], 'M')
+        self.assertEqual(data['total_stitches'], 16)
+        tail = data['stitches'][-2:]
+        self.assertEqual(tail[0]['stitch'], 'k2tog')
+        self.assertEqual((tail[0]['in_start'], tail[0]['in_end']), (15, 16))
+
+    def test_pagination_flags_and_starts(self):
+        # 35 组 × 2 针法 = 70 个：第 1 页 1..50，第 2 页 51..70
+        data = self.preview(self.SIZES, '(k2tog yo)*35', 1, 0, 1)
+        self.assertTrue(data['ok'])
+        self.assertEqual(len(data['stitches']), 50)
+        self.assertFalse(data['has_prev'])
+        self.assertTrue(data['has_next'])
+        self.assertEqual(data['next_start'], 51)
+        data2 = self.preview(self.SIZES, '(k2tog yo)*35', 1, 0, 51)
+        self.assertEqual(len(data2['stitches']), 20)
+        self.assertEqual(data2['start'], 51)
+        self.assertEqual(data2['end'], 70)
+        self.assertTrue(data2['has_prev'])
+        self.assertEqual(data2['prev_start'], 1)
+        self.assertFalse(data2['has_next'])
+        self.assertIsNone(data2['next_start'])
+
+    def test_start_mid_repeat_ranges_are_continuous(self):
+        # 从第 2 个针法（yo）起翻到尾页，针位与从首页顺序计算一致
+        full = self.preview(self.SIZES, '(k2tog yo)*6', 1, 0, 1)['stitches']
+        page = self.preview(self.SIZES, '(k2tog yo)*6', 1, 0, 2)['stitches']
+        self.assertEqual(page, full[1:])
+
+    def test_huge_repeat_tail_page_directly(self):
+        data = self.preview(self.SIZES, '(k yo k2tog)*1000000000', 1, 0,
+                            2999999999)
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['total_stitches'], 3000000000)
+        self.assertEqual(len(data['stitches']), 2)
+        self.assertEqual(data['stitches'][0]['stitch'], 'yo')
+        self.assertEqual(data['stitches'][0]['insert_after'], 2999999998)
+        self.assertEqual(data['stitches'][1]['stitch'], 'k2tog')
+        self.assertEqual((data['stitches'][1]['in_start'],
+                          data['stitches'][1]['in_end']),
+                         (2999999999, 3000000000))
+        # 尾页没有下一页
+        self.assertFalse(data['has_next'])
+        self.assertTrue(data['has_prev'])
+
+    def test_nested_huge_repeat_tail(self):
+        data = self.preview(self.SIZES, '((k yo)*1000000000 k2tog)*3', 1, 0,
+                            6000000003)
+        self.assertTrue(data['ok'])
+        self.assertEqual(len(data['stitches']), 1)
+        st = data['stitches'][0]
+        self.assertEqual(st['stitch'], 'k2tog')
+        self.assertEqual((st['in_start'], st['in_end']),
+                         (3000000005, 3000000006))
+        self.assertEqual(st['out_start'], 6000000003)
+
+    def test_default_size_and_start(self):
+        data = self.client.post('/api/preview-row', json={
+            'sizes': self.SIZES,
+            'pattern': 'k*3',
+            'line': 1,
+        }).get_json()
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['size'], 0)
+        self.assertEqual(data['start'], 1)
+        self.assertEqual(len(data['stitches']), 3)
+
+    def test_parse_error_returns_position_no_partial_preview(self):
+        data = self.preview(self.SIZES, 'k*3\nssk\nk*2', 2)
+        self.assertFalse(data['ok'])
+        self.assertNotIn('stitches', data)
+        err = data['error']
+        self.assertEqual(err['type'], 'parse')
+        self.assertEqual(err['line'], 2)
+        self.assertEqual(err['char'], 1)
+        self.assertIn('无法识别', err['message'])
+
+    def test_size_brace_count_mismatch_error(self):
+        data = self.preview(self.SIZES, 'k*{6|8}', 1)
+        self.assertFalse(data['ok'])
+        err = data['error']
+        self.assertEqual(err['type'], 'parse')
+        self.assertEqual(err['line'], 1)
+        self.assertEqual(err['char'], 2)
+        self.assertIn('项数不符', err['message'])
+
+    def test_blank_line_rejected(self):
+        data = self.preview(self.SIZES, 'k*3\n\n k*2', 2)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'line')
+
+    def test_line_out_of_range(self):
+        data = self.preview(self.SIZES, 'k*3', 4)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'line')
+        for bad in [0, -1, '1', 1.5, True, None]:
+            data = self.preview(self.SIZES, 'k*3', bad)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'line', msg=repr(bad))
+
+    def test_bad_size_index(self):
+        for bad in [3, -1, '0', 1.0]:
+            data = self.preview(self.SIZES, 'k*3', 1, bad)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'size', msg=repr(bad))
+
+    def test_start_out_of_range_and_invalid(self):
+        data = self.preview(self.SIZES, 'k*3', 1, 0, 4)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'start')
+        self.assertIn('3', data['error']['message'])
+        for bad in [0, -2, '2', 1.5, True]:
+            data = self.preview(self.SIZES, 'k*3', 1, 0, bad)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'start', msg=repr(bad))
+
+    def test_bad_sizes(self):
+        data = self.preview([], 'k*3', 1)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'sizes')
+
+    def test_original_apis_still_work(self):
+        # 校验、用量与尺码移动不受预览接口影响（冒烟）
+        ok = self.client.post('/api/validate-sizes', json={
+            'sizes': self.SIZES,
+            'pattern': '(k2tog yo)*{6|8|10}\np*{12|16|20}\n(k2tog)*{6|8|10}',
+        }).get_json()
+        self.assertTrue(ok['ok'])
+        moved = self.client.post('/api/move-size', json={
+            'sizes': self.SIZES,
+            'pattern': 'k*{6|8|10}',
+            'index': 0, 'direction': 'down',
+        }).get_json()
+        self.assertTrue(moved['ok'])
+        self.assertEqual(moved['pattern'], 'k*{8|6|10}')
+
+
 if __name__ == '__main__':
     unittest.main()

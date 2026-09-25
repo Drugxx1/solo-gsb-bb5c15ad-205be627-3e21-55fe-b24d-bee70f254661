@@ -33,6 +33,12 @@
       普通 <code>*n</code> 与其他原文不变；若某处按尺码倍数项数或数值不合法，整次移动不生效，
       并提示原文行号与字符位置。
     </p>
+    <p class="hint">
+      下方“单行针位预览”可选择图解中的一行、一个尺码和起始操作序号，查看该行在该尺码下的
+      实际针法：每页最多 50 个，标明每个针法消耗的入针范围与产出的出针位置；挂线
+      <code>yo</code> 零入针，会标明插入在第几针之后。嵌套重复与按尺码倍数按所选尺码定位，
+      不展开整行，十亿次重复也能直接翻看尾段。
+    </p>
 
     <form id="check-form">
       <div class="field">
@@ -87,6 +93,50 @@
     <section id="result" hidden>
       <div id="summary"></div>
       <div id="sizes-results" class="sizes-results"></div>
+    </section>
+
+    <section id="preview" class="preview-section">
+      <h2>单行针位预览</h2>
+      <div class="preview-controls">
+        <label class="preview-control">
+          <span>图解行</span>
+          <select id="preview-line"></select>
+        </label>
+        <label class="preview-control">
+          <span>尺码</span>
+          <select id="preview-size"></select>
+        </label>
+        <label class="preview-control">
+          <span>起始操作序号</span>
+          <input type="number" id="preview-start" min="1" step="1" value="1">
+        </label>
+        <button type="button" id="preview-go">预览</button>
+      </div>
+      <div id="preview-message" class="preview-message" hidden></div>
+      <div id="preview-result" hidden>
+        <div id="preview-summary" class="preview-summary"></div>
+        <div class="preview-table-wrap">
+          <table id="preview-table">
+            <thead>
+              <tr>
+                <th>序号</th>
+                <th>针法</th>
+                <th>入针范围</th>
+                <th>出针</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="preview-pager">
+          <button type="button" id="preview-first" class="small">« 首页</button>
+          <button type="button" id="preview-prev" class="small">‹ 上一页</button>
+          <span id="preview-page-info"></span>
+          <button type="button" id="preview-next" class="small">下一页 ›</button>
+          <button type="button" id="preview-last" class="small">尾页 »</button>
+        </div>
+      </div>
     </section>
   </main>
 
