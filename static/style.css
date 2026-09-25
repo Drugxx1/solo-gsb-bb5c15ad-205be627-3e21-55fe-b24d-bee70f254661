@@ -1,0 +1,334 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  background: #f6f4ef;
+  color: #333;
+}
+
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+}
+
+h1 {
+  font-size: 1.5rem;
+}
+
+.hint {
+  font-size: 0.9rem;
+  color: #666;
+  line-height: 1.7;
+}
+
+code {
+  background: #ece7da;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.field {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.field span {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+input[type="number"],
+input[type="text"],
+textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #c9c2b2;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  background: #fff;
+}
+
+input[type="number"] {
+  max-width: 160px;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+}
+
+button {
+  padding: 8px 22px;
+  border: none;
+  border-radius: 6px;
+  font-size: 1rem;
+  cursor: pointer;
+  background: #7a6c5d;
+  color: #fff;
+}
+
+button[type="button"] {
+  background: #b0a48f;
+}
+
+button:hover {
+  filter: brightness(1.08);
+}
+
+#result {
+  margin-top: 24px;
+}
+
+#summary {
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  background: #ece7da;
+}
+
+#summary.ok {
+  background: #e0efdd;
+  color: #2e6b2e;
+}
+
+#summary.error,
+.error {
+  background: #f8e1e1;
+  color: #a33;
+}
+
+#error-box {
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+}
+
+th,
+td {
+  padding: 8px 10px;
+  border: 1px solid #e2dccb;
+  text-align: left;
+  font-size: 0.95rem;
+}
+
+th {
+  background: #efe9db;
+}
+
+td:nth-child(2) {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+
+/* 尺码编辑列表 */
+#sizes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.size-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.size-row .size-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.size-row .size-cast-on {
+  width: 120px;
+}
+
+.remove-size {
+  padding: 8px 14px;
+  background: #b0a48f;
+  line-height: 1;
+}
+
+.move-size {
+  padding: 8px 12px;
+  background: #b0a48f;
+  line-height: 1;
+}
+
+.move-size:disabled,
+.remove-size:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 尺码上移/下移的结果或错误提示 */
+.move-message {
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.92rem;
+}
+
+.move-message.ok {
+  background: #e0efdd;
+  color: #2e6b2e;
+}
+
+.move-message.error {
+  background: #f8e1e1;
+  color: #a33;
+}
+
+button.small {
+  padding: 6px 14px;
+  font-size: 0.9rem;
+  background: #b0a48f;
+}
+
+/* 多尺码结果并排展示 */
+.sizes-results {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.size-card {
+  flex: 1 1 0;
+  min-width: 250px;
+  background: #fff;
+  border: 1px solid #e2dccb;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.size-card h2 {
+  font-size: 1.05rem;
+  margin: 0 0 10px;
+}
+
+.size-status {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  font-size: 0.92rem;
+}
+
+.size-status.ok {
+  background: #e0efdd;
+  color: #2e6b2e;
+}
+
+.size-status.error {
+  background: #f8e1e1;
+  color: #a33;
+}
+
+.size-error {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+/* 错误行的倍数修正建议 */
+.suggestion-box {
+  background: #e9f2e4;
+  border: 1px solid #cbdec2;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  font-size: 0.9rem;
+  line-height: 1.8;
+}
+
+.suggestion-title {
+  font-weight: 600;
+  color: #2e6b2e;
+}
+
+.suggestion-text {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+
+.apply-suggestion {
+  margin-top: 6px;
+  background: #6b8f5e;
+}
+
+/* 线材用量参数输入 */
+.yarn-field {
+  border: 1px solid #c9c2b2;
+  border-radius: 6px;
+  padding: 10px 14px 14px;
+  margin-bottom: 14px;
+}
+
+.yarn-field legend {
+  font-weight: 600;
+  padding: 0 6px;
+}
+
+.yarn-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px 16px;
+}
+
+.yarn-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.yarn-item span {
+  font-size: 0.9rem;
+  margin-bottom: 0;
+}
+
+.yarn-item input[type="number"] {
+  width: 100%;
+  max-width: none;
+}
+
+/* 尺码卡片中的线材用量 */
+.yarn-box {
+  background: #f3efe4;
+  border: 1px solid #e2dccb;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  font-size: 0.92rem;
+  line-height: 1.8;
+}
+
+.yarn-title {
+  font-weight: 600;
+}
+
+.yarn-partial {
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #fbeed3;
+  color: #8a611c;
+  font-weight: 600;
+}

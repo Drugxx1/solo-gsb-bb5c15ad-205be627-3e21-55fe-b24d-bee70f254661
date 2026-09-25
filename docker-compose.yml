@@ -1,0 +1,8 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"   # 宿主机端口:容器端口，改左侧即可换访问端口
+    environment:
+      PORT: 8000       # 容器内监听端口，需与右侧容器端口一致
+    restart: unless-stopped
